@@ -123,11 +123,11 @@ class HeteroGTPreTrain(nn.Module):
         num_visits = (age_ids != self.age_pad_id).sum(dim=1) # [B], number of visits for each patient in the batch
         assert torch.all(num_visits == (adm_index.masked_fill(adm_index > self.max_num_adms, -1).max(dim=1).values)), "num_visits does not match adm_index"
         
-        # 基础表示
+        # basic embedding
         seq_embed = self.token_emb(input_ids)  # [B, L, d]
         visit_embed = self.token_emb(age_ids) # [B, V, d]
 
-        # src_key_padding_mask, token_types, adm_index 不依赖于transformer的层数，提前准备
+        # src_key_padding_mask, token_types, adm_index for the full sequence (main seq + visit nodes)
         src_key_padding_mask = torch.cat([(input_ids == self.seq_pad_id), (age_ids == self.age_pad_id)], dim=1)
         assert src_key_padding_mask.shape == (B, L + V), "src_key_padding_mask shape mismatch"
         # we already have token_types for main seq, just prepare token types for visit nodes
@@ -273,36 +273,34 @@ class HeteroGTPreTrain(nn.Module):
         B = len(num_visits)
         total_visits = sum(num_visits).item()
         
-        # 确保 gnn_out 的第一维与总访问次数匹配
+        # make sure gnn_out has the correct number of nodes
         assert gnn_out.size(0) == total_visits, f"gnn_out.size(0) {gnn_out.size(0)} != total_visits {total_visits}"
         
-        # 计算每个批次的累积偏移量
+        # compute offsets for each patient in the batch
         cumsum = torch.cumsum(num_visits, dim=0)  # [B]
         offsets = torch.cat([torch.tensor([0], device=self.device), cumsum[:-1]])  # [B]
 
-        # 创建索引以从 gnn_out 中提取所有批次的嵌入
-        # 修复：索引应该从 0 到 total_visits-1
+        # compute visit positions
         indices = torch.arange(total_visits, device=self.device)  # [total_visits]
         batch_indices = torch.repeat_interleave(torch.arange(B, device=self.device), num_visits)  # [total_visits]
-        visit_pos = indices - offsets[batch_indices]  # [total_visits]，每个嵌入的相对位置
+        visit_pos = indices - offsets[batch_indices]  # [total_visits], visit position within each patient
 
-        # 创建目标张量 visit_emb_pad，初始化为零
+        # create padded visit embeddings
         visit_emb_pad = torch.zeros(B, V, self.d_model, device=self.device, dtype=gnn_out.dtype)  # [B, V, d]
 
-        # 创建掩码，选择有效位置 (visit_pos < V 且 visit_pos < num_visits)
+        # create mask for valid positions (visit_pos < V and visit_pos < num_visits)
         mask = (visit_pos < V) & (visit_pos < num_visits[batch_indices])  # [total_visits]
         valid_indices = indices[mask]  # [N_valid]
         valid_batch_indices = batch_indices[mask]  # [N_valid]
         valid_visit_pos = visit_pos[mask]  # [N_valid]
         
         # sanity check
-        if len(valid_visit_pos) > 0:  # 只有在有有效位置时才检查
+        if len(valid_visit_pos) > 0:  # only check when there are valid positions
             assert valid_visit_pos.max().item() < V, f"valid_visit_pos max {valid_visit_pos.max().item()} >= V {V}"
             assert valid_batch_indices.max().item() < B, f"valid_batch_indices max {valid_batch_indices.max().item()} >= B {B}"
-            # 修复：索引应该 < gnn_out.size(0)，而不是 <= 
             assert valid_indices.max().item() < gnn_out.size(0), f"valid_indices max {valid_indices.max().item()} >= gnn_out.size(0) {gnn_out.size(0)}"
 
-        # 使用 scatter 将 gnn_out 的值分配到 visit_emb_pad
+        # use advanced indexing to fill in the valid positions
         visit_emb_pad[valid_batch_indices, valid_visit_pos] = gnn_out[valid_indices]
         return visit_emb_pad
     
@@ -351,13 +349,12 @@ class HeteroGTPreTrain(nn.Module):
             assert (token_types[i, vals] == self.node_type_id_dict['diag']).all(), f"values check fail at {i}"
 
         # build attn mask
-        attn_mask = self.build_attn_mask(token_types, forbid_map=attn_mask_dicts[layer_i], 
-                                         num_heads=self.num_attn_heads, allow_attn_dicts=diag_code_group_dicts)
+        attn_mask = self.build_attn_mask(token_types, forbid_map=attn_mask_dicts[layer_i], num_heads=self.num_attn_heads, allow_attn_dicts=diag_code_group_dicts)
 
         return x, attn_mask
 
     def process_tf_out(self, h, L, V):
-        # h: [B, L+V, d]。其中 h[:, 0, :] 为 [CLS]（或序列首位）
+        # h: [B, L+V, d] split into seq_embed and visit_embed
         assert h.shape[1] == L + V, "Transformer output length mismatch"
         return h[:, :L, :], h[:, L:, :]
     
@@ -387,17 +384,17 @@ class HeteroGTPreTrain(nn.Module):
             m = int(m_per_b[b].item())
             Z = seq_embed[b, mask[b], :]               # [m, D]
 
-            # 按通道（D 维）做 z-score：每个 token 向量零均值、单位方差
+            # Channel-wise (D-dim) z-score: each token vector becomes zero-mean, unit-variance
             Z = Z - Z.mean(dim=1, keepdim=True)
             std = Z.var(dim=1, unbiased=False, keepdim=True).add(eps).sqrt()
             Z = Z / std                                 # [m, D]
 
-            # 相关矩阵（把 D 当“样本数”）
+            # Correlation matrix (treating D as "number of samples")
             X = Z.transpose(0, 1)                        # [D, m]
             C = (X.T @ X) / X.shape[0]                   # [m, m]
 
             off_mask = ~torch.eye(m, device=Z.device, dtype=torch.bool)
-            loss_off = (C[off_mask] ** 2).mean()         # 平均每个非对角元素
+            loss_off = (C[off_mask] ** 2).mean()         # average over off-diagonal entries
 
             loss_diag = 0.0
             if diag_weight > 0:
@@ -407,7 +404,7 @@ class HeteroGTPreTrain(nn.Module):
 
         loss = torch.stack(losses)
         return loss.mean() if reduction == "mean" else loss.sum()
-        
+            
     @staticmethod
     def build_attn_mask(token_types, forbid_map, num_heads, allow_attn_dicts):
         B, L = token_types.shape
@@ -416,7 +413,7 @@ class HeteroGTPreTrain(nn.Module):
         if forbid_map == None:
             mask = torch.zeros((B, L, L), dtype=torch.bool, device=device)
         else:
-            # 收集所有出现的 token 类型
+            # Collect all token types that appear
             observed = torch.unique(token_types)
             for q_t, ks in forbid_map.items():
                 observed = torch.unique(torch.cat([observed, torch.tensor([q_t] + list(ks), device=device)]))
@@ -424,26 +421,26 @@ class HeteroGTPreTrain(nn.Module):
             t2i = {t.item(): i for i, t in enumerate(type_list)}  # Map token types to indices
             T = len(type_list)
 
-            # 构造禁止矩阵 (T, T)，单向关系
+            # Build ban table (T, T), directional relation
             ban_table = torch.zeros((T, T), dtype=torch.bool, device=device)
             for q_t, ks in forbid_map.items():
                 if q_t in t2i:
                     qi = t2i[q_t]
                     for k_t in ks:
                         if k_t in t2i:
-                            ban_table[qi, t2i[k_t]] = True  # 只设置 q -> k 的禁止
+                            ban_table[qi, t2i[k_t]] = True  # only set q -> k as forbidden
 
-            # 向量化映射 token_types 到类型索引
+            # Vectorized mapping from token_types to type indices
             mapping = torch.zeros_like(type_list, dtype=torch.long, device=device)
             for t, i in t2i.items():
                 mapping[type_list == t] = i
             q_idx = mapping[torch.searchsorted(type_list, token_types.unsqueeze(-1))]
             k_idx = mapping[torch.searchsorted(type_list, token_types.unsqueeze(-2))]
 
-            # 查询 ban_table 得到 (B, L, L)
+            # Query ban_table to get (B, L, L)
             mask = ban_table[q_idx, k_idx].to(torch.bool)
         
-        # —— 追加 allow 约束：白名单式 —— 
+        # —— Add allow constraints (whitelist style) ——
         if allow_attn_dicts is not None:
             for b, dct in enumerate(allow_attn_dicts):
                 if dct is None:
@@ -455,11 +452,11 @@ class HeteroGTPreTrain(nn.Module):
                         continue
                     mask[b, q_idx, k_idx] = False
         
-        # make sure each token can at least attend to itself
+        # Ensure each token can at least attend to itself
         diag_mask = torch.eye(L, dtype=torch.bool, device=mask.device).unsqueeze(0).expand(B, L, L)
         mask = mask & ~diag_mask
 
-        # 扩展到 num_heads
+        # Expand to num_heads
         mask = mask.unsqueeze(1).expand(B, num_heads, L, L)
         mask = mask.reshape(B * num_heads, L, L)
         return mask

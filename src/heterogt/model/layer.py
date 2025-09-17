@@ -3,6 +3,117 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import HeteroConv, GATConv
 
+# multi-class classification task
+class MultiPredictionHead(nn.Module):
+    def __init__(self, hidden_size, label_size):
+        super(MultiPredictionHead, self).__init__()
+        self.cls = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size), 
+                nn.ReLU(), 
+                nn.Linear(hidden_size, label_size)
+            )
+
+    def forward(self, input):
+        return self.cls(input)
+    
+class BinaryPredictionHead(nn.Module):
+    def __init__(self, hidden_size):
+        super(BinaryPredictionHead, self).__init__()
+        self.cls = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size), 
+                nn.ReLU(), 
+                nn.Linear(hidden_size, 1)
+            )
+    def forward(self, input):
+        return self.cls(input)
+    
+class HierTransformerLayer(nn.Module):
+    def __init__(self, d_model, num_heads, batch_first=True, norm_first=True):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.transformer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads, batch_first=batch_first, norm_first=norm_first)
+
+    def forward(self, x, src_key_padding_mask, attn_mask):
+        """
+        src:                [B, L, d] (batch_first=True)
+        attn_masks:         [B*num_heads, L, L]
+        src_key_padding_mask: [B, L]; True=PAD
+        """
+        B, L, _ = x.shape
+        H = self.num_heads
+        out = self.transformer(src=x, src_key_padding_mask=src_key_padding_mask, src_mask=attn_mask)
+        rows_use = self._rows_from_attn_mask(attn_mask, src_key_padding_mask, B, H)
+        x = self._blend_update(x, out, rows_use)
+        return x
+
+    @staticmethod
+    def _blend_update(x_old: torch.Tensor, x_new: torch.Tensor, update_rows: torch.BoolTensor):
+        """
+        Use x_new to overwrite only the rows where update_rows=True; 
+        for all other rows, keep x_old.
+        x_old, x_new: [B, L, d]
+        update_rows: [B, L] (True = update)
+        """
+        mask = update_rows.unsqueeze(-1)              # [B, L, 1]
+        return torch.where(mask, x_new, x_old)
+
+    @staticmethod
+    def _rows_from_attn_mask(attn_mask: torch.Tensor, src_key_padding_mask: torch.Tensor, B: int, H: int):
+        """
+        Infer the "rows allowed as Query" from the [B*H, L, L] attn_mask 
+        (i.e., a row has at least one non-self unmasked column and is not a padding token).  
+        Returns [B, L] as a boolean mask: True means the row will be updated in this forward pass.
+
+        Conventions:
+            attn_mask == True  → blocked
+            attn_mask == False → allowed
+            src_key_padding_mask == True → padding token
+
+        Args:
+            attn_mask: [B*H, L, L], torch.bool, attention mask
+            src_key_padding_mask: [B, L], torch.bool, padding mask (True = padding)
+            B: int, batch size
+            H: int, number of heads
+
+        Returns:
+            row_updatable: [B, L], torch.bool, True indicates the token should be updated
+        """
+        BH, L, _ = attn_mask.shape
+        assert BH == B * H, f"attn_mask first dimension must be B*num_heads, got {BH} vs {B}*{H}"
+        assert src_key_padding_mask.shape == (B, L), \
+            f"src_key_padding_mask shape must be [B, L], got {src_key_padding_mask.shape}"
+        assert src_key_padding_mask.dtype == torch.bool, "src_key_padding_mask must be torch.bool type"
+        assert src_key_padding_mask.device == attn_mask.device, \
+            f"Device mismatch: src_key_padding_mask on {src_key_padding_mask.device}, attn_mask on {attn_mask.device}"
+
+        m = attn_mask.view(B, H, L, L)  # [B, H, L, L]
+        
+        # Create diagonal mask to ignore self-attention positions
+        diag_mask = torch.eye(L, dtype=torch.bool, device=attn_mask.device)  # [L, L]
+        diag_mask = diag_mask.unsqueeze(0).unsqueeze(0).expand(B, H, L, L)  # [B, H, L, L]
+        
+        # Set diagonal positions to True (blocked), so only non-diagonal False entries are considered
+        m_non_diag = m | diag_mask  # [B, H, L, L]
+        
+        # Apply padding mask: mask out all columns corresponding to padding tokens
+        padding_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, L, 1]
+        m_non_diag = m_non_diag | padding_mask  # [B, H, L, L]
+
+        # Check if each row (Query) is fully blocked (ignoring self and padding tokens)
+        row_all_banned = m_non_diag.all(dim=-1)  # [B, H, L]
+        
+        # A row is updatable if it has at least one unmasked non-self column in any head
+        row_updatable = (~row_all_banned).any(dim=1)  # [B, L]
+        
+        # Exclude padding tokens: they should not be updated
+        row_updatable = row_updatable & (~src_key_padding_mask)  # [B, L]
+
+        # Debug print
+        print(f"[DEBUG] row_updatable shape: {row_updatable.shape}, dtype: {row_updatable.dtype}")
+
+        return row_updatable
+    
 class DiseaseOccHetGNN(nn.Module):
     def __init__(self, d_model: int, heads: int = 4, dropout: float = 0.0):
         super().__init__()
@@ -58,106 +169,6 @@ class DiseaseOccHetGNN(nn.Module):
 
         return {'visit': v_out, 'occ': o_out}
     
-# multi-class classification task
-class MultiPredictionHead(nn.Module):
-    def __init__(self, hidden_size, label_size):
-        super(MultiPredictionHead, self).__init__()
-        self.cls = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size), 
-                nn.ReLU(), 
-                nn.Linear(hidden_size, label_size)
-            )
-
-    def forward(self, input):
-        return self.cls(input)
-    
-class BinaryPredictionHead(nn.Module):
-    def __init__(self, hidden_size):
-        super(BinaryPredictionHead, self).__init__()
-        self.cls = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size), 
-                nn.ReLU(), 
-                nn.Linear(hidden_size, 1)
-            )
-    def forward(self, input):
-        return self.cls(input)
-    
-class HierTransformerLayer(nn.Module):
-    def __init__(self, d_model, num_heads, batch_first=True, norm_first=True):
-        super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.transformer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads, batch_first=batch_first, norm_first=norm_first)
-
-    def forward(self, x, src_key_padding_mask, attn_mask):
-        """
-        src:                [B, L, d] (batch_first=True)
-        attn_masks:         [B*num_heads, L, L]
-        src_key_padding_mask: [B, L]; True=PAD
-        """
-        B, L, _ = x.shape
-        H = self.num_heads
-        out = self.transformer(src=x, src_key_padding_mask=src_key_padding_mask, src_mask=attn_mask)
-        rows_use = self._rows_from_attn_mask(attn_mask, src_key_padding_mask, B, H)
-        x = self._blend_update(x, out, rows_use)
-        return x
-
-    @staticmethod
-    def _blend_update(x_old: torch.Tensor, x_new: torch.Tensor, update_rows: torch.BoolTensor):
-        """
-        只在 update_rows=True 的行用 x_new 覆盖；其余行保留 x_old
-        x_old, x_new: [B, L, d]
-        update_rows:  [B, L] (True=更新)
-        """
-        mask = update_rows.unsqueeze(-1)              # [B, L, 1]
-        return torch.where(mask, x_new, x_old)
-
-    @staticmethod
-    def _rows_from_attn_mask(attn_mask: torch.Tensor, src_key_padding_mask: torch.Tensor, B: int, H: int):
-        """
-        从 [B*H, L, L] 的 attn_mask 推断“允许作为 Query 的行”(即该行存在至少1个非自身的未屏蔽列, 
-        且该行不是填充 token)。返回 [B, L] 的 bool: True 表示该行会被本次前向更新。
-        约定:attn_mask==True 为“禁止”, False 为“允许”, src_key_padding_mask==True 为填充 token。
-        
-        参数：
-            attn_mask: [B*H, L, L], torch.bool, 注意力掩码
-            src_key_padding_mask: [B, L], torch.bool, 填充掩码, True 表示填充
-            B: batch_size
-            H: num_heads
-        返回：
-            row_updatable: [B, L], torch.bool, True 表示该 token 需要更新
-        """
-        BH, L, _ = attn_mask.shape
-        assert BH == B * H, f"attn_mask 第一维应为 B*num_heads, got {BH} vs {B}*{H}"
-        assert src_key_padding_mask.shape == (B, L), \
-            f"src_key_padding_mask 形状应为 [B, L], got {src_key_padding_mask.shape}"
-        assert src_key_padding_mask.dtype == torch.bool, "src_key_padding_mask 必须是 torch.bool 类型"
-        assert src_key_padding_mask.device == attn_mask.device, \
-            f"设备不匹配: src_key_padding_mask 在 {src_key_padding_mask.device}, attn_mask 在 {attn_mask.device}"
-
-        m = attn_mask.view(B, H, L, L)  # [B, H, L, L]
-        
-        # 创建对角线掩码，忽略对角线的影响
-        diag_mask = torch.eye(L, dtype=torch.bool, device=attn_mask.device)  # [L, L]
-        diag_mask = diag_mask.unsqueeze(0).unsqueeze(0).expand(B, H, L, L)  # [B, H, L, L]
-        
-        # 将对角线位置设置为 True（屏蔽），以检查非对角线的 False，因为我们原来对角线最后设置的是False
-        m_non_diag = m | diag_mask  # [B, H, L, L]
-        
-        # 考虑 src_key_padding_mask，屏蔽填充 token 对应的 Key 位置
-        padding_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, L, 1]
-        m_non_diag = m_non_diag | padding_mask  # [B, H, L, L]，填充 token 的列全为 True（屏蔽）
-
-        # 检查每行（Query）是否全屏蔽（忽略对角线和填充 token）
-        row_all_banned = m_non_diag.all(dim=-1)  # [B, H, L]
-        
-        # 如果某行在任一 head 中有非自身的未屏蔽列（非填充 token），则需要更新
-        row_updatable = (~row_all_banned).any(dim=1)  # [B, L]
-        
-        # 排除填充 token：填充 token (src_key_padding_mask == True) 不应更新
-        row_updatable = row_updatable & (~src_key_padding_mask)  # [B, L]
-        return row_updatable
-    
 class CLSQueryMHA(nn.Module):
     def __init__(self, d_model: int, num_heads: int, attn_token_type: list, dropout: float = 0.0, 
                  use_raw_value_agg: bool = True, fallback_to_cls: bool = True):
@@ -171,61 +182,63 @@ class CLSQueryMHA(nn.Module):
 
     def forward(self, x: torch.Tensor, token_type: torch.Tensor):
         """
-        x: [B, L, D]
-        token_type: [B, L] (long/int)
-        return:
-            out: [B, 2D]  = concat([CLS], agg)
-            attn_probs: [B, H, 1, L]  方便调试（每头的注意力）
+        Args:
+            x: [B, L, D]
+            token_type: [B, L] (long/int)
+
+        Returns:
+            out: [B, 2D] = concat([CLS], agg)
+            attn_probs: [B, H, 1, L]  (for debugging; per-head attention)
         """
         B, L, D = x.shape
         assert token_type.shape == (B, L)
         assert D == self.d_model
 
-        # 1) CLS 作为单查询
+        # 1) CLS as the single query
         cls = x[:, 0, :]                 # [B, D]
         q   = cls.unsqueeze(1)           # [B, 1, D]
         k   = x                          # [B, L, D]
         v   = x                          # [B, L, D]
 
-        # 2) 构造 key_padding_mask：True=忽略（屏蔽）
+        # 2) Build key_padding_mask: True = ignore (mask out)
         allowed = torch.zeros_like(token_type, dtype=torch.bool)
         for t in self.attn_token_types:
             allowed |= (token_type == t)
-        kv_mask = ~allowed   # 非 {attn_token_types} 位置屏蔽
-        # 防止整行全 True（即没有 {6,7}）导致 softmax NaN：临时放开 CLS 位
+        kv_mask = ~allowed   # mask out positions not in {attn_token_types}
+        # Prevent entire row being True (no {6,7}) which causes softmax NaN: temporarily unmask CLS
         no_kv = kv_mask.all(dim=1)       # [B]
         if no_kv.any():
             kv_mask = kv_mask.clone()
-            kv_mask[no_kv, 0] = False    # 避免 NaN；之后会覆盖聚合结果
+            kv_mask[no_kv, 0] = False    # avoid NaN; aggregation result will be overwritten later
 
-        # 3) 多头注意力（需要权重；不按头平均）
+        # 3) Multi-head attention (retain weights; do not average across heads)
         attn_out, attn_probs = self.mha(
             q, k, v,
-            key_padding_mask=kv_mask,           # [B, L]；True=忽略
+            key_padding_mask=kv_mask,           # [B, L]; True = ignore
             need_weights=True,
             average_attn_weights=False          # -> [B, H, 1, L]
         )  # attn_out: [B, 1, D]
 
-        # 4) 由注意力得到聚合向量
+        # 4) Aggregate vector from attention
         if self.use_raw_value_agg:
-            # 在“输入空间”用权重显式加权得到均值
-            w = attn_probs.mean(dim=1)         # [B, 1, L] 按头平均
-            # 置零被屏蔽位置，子集重归一化（避免数值泄漏到非 {6,7}）
+            # Compute weighted average explicitly in the "input space"
+            w = attn_probs.mean(dim=1)          # [B, 1, L], averaged across heads
+            # Zero out masked positions, renormalize within the subset (avoid leakage into non-{6,7})
             w = w.masked_fill(kv_mask.unsqueeze(1), 0.0)  # [B, 1, L]
-            denom = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)  # [B,1,1]
+            denom = w.sum(dim=-1, keepdim=True).clamp_min(1e-12)  # [B, 1, 1]
             w = w / denom
             agg = torch.bmm(w.reshape(B, 1, L), x).squeeze(1)      # [B, D]
         else:
-            # 直接使用 MHA 的输出（已在 value 投影+out_proj 空间）
+            # Directly use MHA output (already in value-projection + out_proj space)
             agg = attn_out.squeeze(1)   # [B, D]
 
-        # 5) 无 {6,7} 的样本回退策略
+        # 5) Fallback strategy for samples with no {6,7}
         if no_kv.any():
             if self.fallback_to_cls:
                 agg = agg.clone()
-                agg[no_kv] = cls[no_kv]    # 回退为 CLS
+                agg[no_kv] = cls[no_kv]    # fallback to CLS
             else:
                 agg = agg.clone()
-                agg[no_kv] = 0.0           # 回退为零向量
+                agg[no_kv] = 0.0           # fallback to zero vector
         assert agg.shape == (B, D), "CLS output shape mismatch"
         return agg  # [B, D]

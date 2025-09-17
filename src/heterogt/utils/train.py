@@ -32,9 +32,9 @@ def train_with_early_stopping(model, train_dataloader, val_dataloader, test_data
                               optimizer, loss_fn, device, early_stop_patience, task_type, epochs, dec_loss_lambda = 0, 
                               val_long_seq_idx=None, test_long_seq_idx=None, eval_metric="prauc", return_model=False):
 
-    # ---- 设备与AMP开关 ----
+    # ---- Device & AMP switch ----
     device_type = device.type  # 'cuda' | 'cpu' | 'mps'
-    use_amp = (device_type == "cuda")   # 仅在 CUDA 上启用 AMP/GradScaler，避免 CPU/MPS 警告
+    use_amp = (device_type == "cuda")   # Enable AMP/GradScaler only on CUDA to avoid CPU/MPS warnings
     scaler = GradScaler(enabled=use_amp)
 
     best_score = 0.0
@@ -44,7 +44,7 @@ def train_with_early_stopping(model, train_dataloader, val_dataloader, test_data
     best_model_state = deepcopy(model.state_dict())
     epochs_no_improve = 0
 
-    # 选择合适的 autocast 上下文（CPU/MPS 用 nullcontext，或手动设 enabled=False）
+    # Choose the proper autocast context (use nullcontext on CPU/MPS, or set enabled=False manually)
     amp_ctx = (autocast() if use_amp else nullcontext())
 
     for epoch in range(1, epochs + 1):
@@ -60,7 +60,7 @@ def train_with_early_stopping(model, train_dataloader, val_dataloader, test_data
         for step, batch in progress_bar:
             optimizer.zero_grad(set_to_none=True)
 
-            # 移到目标设备
+            # Move to target device
             batch = [x.to(device) if isinstance(x, torch.Tensor) else x for x in batch]
             labels = batch[-1].float()
 
@@ -71,14 +71,14 @@ def train_with_early_stopping(model, train_dataloader, val_dataloader, test_data
                     loss = task_loss + dec_loss_lambda * dec_loss
 
                 if use_amp:
-                    # AMP 路径
+                    # AMP path
                     scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)  # 反缩放后再裁剪
+                    scaler.unscale_(optimizer)  # Unscale before clipping
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    # FP32 路径（CPU/MPS）
+                    # FP32 path (CPU/MPS)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
@@ -111,7 +111,7 @@ def train_with_early_stopping(model, train_dataloader, val_dataloader, test_data
             except Exception:
                 pass
 
-        # 验证 + 早停
+        # Validation + Early stopping
         (best_score, best_val_metric, best_test_metric, best_test_long_seq_metric, best_model_state,
          epochs_no_improve, early_stop_triggered) = evaluate_and_early_stop(
             model, val_dataloader, test_dataloader, device, task_type,
@@ -142,11 +142,12 @@ def evaluate_and_early_stop(model, val_dataloader, test_dataloader, device, task
                                   best_score, best_val_metric, best_test_metric, best_test_long_seq_metric, 
                                   best_model_state, epochs_no_improve, early_stop_patience):
     """
-    执行模型在验证集和测试集的评估，并进行早停检查。
-    返回：
+    Run evaluation on the validation and test sets, and perform early-stopping checks.
+    Returns:
         - best_score
         - best_val_metric
         - best_test_metric
+        - best_test_long_seq_metric
         - best_model_state
         - epochs_no_improve
         - early_stop_triggered (bool)
@@ -217,39 +218,39 @@ def run_multilabel_metrics(
     assert predictions.shape == labels.shape, "shape mismatch [B, C]"
     B, C = predictions.shape
 
-    # 1) 连续分数（用于 AUC / PR-AUC）
+    # 1) Continuous scores (for AUC / PR-AUC)
     with torch.no_grad():
         if predictions_are_logits:
-            # CPU half 无 sigmoid 实现时升级到 fp32
+            # Upgrade to fp32 when CPU half has no sigmoid implementation
             if predictions.device.type == "cpu" and predictions.dtype == torch.float16:
                 scores_t = torch.sigmoid(predictions.float())
             else:
                 scores_t = torch.sigmoid(predictions)
         else:
-            # 已是 [0,1] 概率
+            # Already [0,1] probabilities
             scores_t = predictions
 
-        # 2) 阈值化（用于 P/R/F1）
-        # 统一在“概率空间”施加阈值：当 logits 输入时，scores_t 已经是 sigmoid(logits)
-        # 若你想严格使用 logits>0 的判定，可将 threshold 固定为 0.5（两者等价）
+        # 2) Thresholding (for P/R/F1)
+        # Always apply threshold in probability space: when logits are given, scores_t is sigmoid(logits)
+        # If you prefer strict logits>0 criterion, fix threshold at 0.5 (equivalent)
         y_pred_t = (scores_t >= threshold).to(torch.int32)
 
-    # 转 numpy
-    scores = scores_t.cpu().numpy()                  # 连续分数
-    y_pred = y_pred_t.cpu().numpy().astype(np.int32) # 二值预测
-    y_true = labels.cpu().numpy().astype(np.int32)   # 真实标签
+    # Convert to numpy
+    scores = scores_t.cpu().numpy()                  # continuous scores
+    y_pred = y_pred_t.cpu().numpy().astype(np.int32) # binary predictions
+    y_true = labels.cpu().numpy().astype(np.int32)   # ground-truth labels
 
-    # 3) 宏平均 Precision/Recall/F1（阈值后的 0/1）
+    # 3) Macro-averaged Precision/Recall/F1 (thresholded 0/1)
     p_macro, r_macro, f1_macro, _ = precision_recall_fscore_support(
         y_true, y_pred, average="macro", zero_division=0
     )
 
-    # 4) per-class Precision/Recall/F1
+    # 4) Per-class Precision/Recall/F1
     p, r, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average=None, zero_division=0
     )
 
-    # 5) per-class AUC / PR-AUC（连续分数；单一类别 -> NaN）
+    # 5) Per-class AUC / PR-AUC (continuous scores; single-class case -> NaN)
     aucs, praucs = [], []
     for c in range(C):
         yt, ys = y_true[:, c], scores[:, c]
@@ -261,7 +262,7 @@ def run_multilabel_metrics(
             prec_curve, rec_curve, _ = precision_recall_curve(yt, ys)
             praucs.append(auc(rec_curve, prec_curve))
 
-    # 6) 百分比格式化
+    # 6) Percentage formatting
     def pct_scalar(x):
         if x is None:
             return None
@@ -328,7 +329,7 @@ def run_binary_metrics(predictions, labels):
 def evaluate(model, dataloader, device, task_type, long_seq_idx=None):
     model.eval()
 
-    # 仅在 CUDA 上启用 autocast，避免 CPU/MPS 警告
+    # Enable autocast only on CUDA to avoid CPU/MPS warnings
     device_type = device.type  # 'cuda' | 'cpu' | 'mps'
     use_amp = (device_type == "cuda")
     amp_ctx = autocast() if use_amp else nullcontext()
@@ -336,14 +337,14 @@ def evaluate(model, dataloader, device, task_type, long_seq_idx=None):
     all_preds, all_labels = [], []
 
     for _, batch in enumerate(tqdm(dataloader, desc="Running inference")):
-        # move to device
+        # Move to device
         batch = [x.to(device) if isinstance(x, torch.Tensor) else x for x in batch]
         labels = batch[-1]
 
         with amp_ctx:
             output = model(*batch[:-1])
 
-        # 兼容 tensor / tuple / list
+        # Compatible with tensor / tuple / list
         preds = output[0] if isinstance(output, (tuple, list)) else output
 
         all_preds.append(preds)
@@ -352,7 +353,7 @@ def evaluate(model, dataloader, device, task_type, long_seq_idx=None):
     predictions = torch.cat(all_preds, dim=0).detach().cpu()
     labels = torch.cat(all_labels, dim=0).detach().cpu()
 
-    # 若提供 long_seq_idx，确保可用于张量索引
+    # If long_seq_idx is provided, ensure it can be used for tensor indexing
     def _select_long_seq(t):
         if long_seq_idx is None:
             return None
