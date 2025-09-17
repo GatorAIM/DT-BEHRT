@@ -42,8 +42,12 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
    
    These notebooks will perform the necessary preprocessing steps and prepare the datasets for modeling.  
 
-3. **Evaluate the model**  
-   Run the notebook **`test_model.ipynb`**.  
+3. **Pretrain the model**  
+   Run the notebook **`pretrain.ipynb`**.  
+   To switch between datasets, modify the `config.dataset` parameter in the configuration section.
+
+4. **Finetune the model**  
+   Run the notebook **`finetune.ipynb`**.  
    - To evaluate performance on different tasks, adjust the `task_index` in the configuration file:  
      - `0`: In-hospital mortality  
      - `1`: Readmission  
