@@ -17,3 +17,23 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
 - scikit-learn == 1.7.0  
 - scipy == 1.15.3  
 - numpy == 1.26.4 
+
+## Replicating the Results
+1. Download the following files from the [MIMIC-III dataset](https://physionet.org/content/mimiciii/1.4/):  
+   - `ADMISSIONS.csv.gz`  
+   - `DIAGNOSES_ICD.csv.gz`  
+   - `LABEVENTS.csv.gz`  
+   - `PATIENTS.csv.gz`  
+   - `PRESCRIPTIONS.csv.gz`  
+   - `PROCEDURES_ICD.csv.gz`  
+
+   Similarly, download the corresponding files from the [MIMIC-IV dataset](https://physionet.org/content/mimiciv/3.1/) (located in the `hosp` folder). Place them in the following directories:  
+   - `./data_process/MIMIC-III-raw`  
+   - `./data_process/MIMIC-IV-raw`  
+
+2. Run the notebook **`test_model.ipynb`**.  
+   - To evaluate performance on different tasks, set the `task_index` in the configuration file as follows:  
+     - `0`: In-hospital mortality  
+     - `1`: Readmission  
+     - `2`: Prolonged length of stay (PLOS)  
+     - `3`: Phenotyping prediction  
