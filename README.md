@@ -20,7 +20,7 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
 
 ## Replicating the Results
 1. **Download the raw data**  
-   From the [MIMIC-III dataset](https://physionet.org/content/mimiciii/1.4/), obtain the following files (no need to unzip):  
+   From the [MIMIC-III dataset](https://physionet.org/content/mimiciii/1.4/), obtain the following files (**no need to unzip**):  
    - `ADMISSIONS.csv.gz`  
    - `DIAGNOSES_ICD.csv.gz`  
    - `LABEVENTS.csv.gz`  
