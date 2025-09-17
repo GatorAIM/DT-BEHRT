@@ -19,7 +19,8 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
 - numpy == 1.26.4 
 
 ## Replicating the Results
-1. Download the following files from the [MIMIC-III dataset](https://physionet.org/content/mimiciii/1.4/):  
+1. **Download the raw data**  
+   From the [MIMIC-III dataset](https://physionet.org/content/mimiciii/1.4/), obtain the following files:  
    - `ADMISSIONS.csv.gz`  
    - `DIAGNOSES_ICD.csv.gz`  
    - `LABEVENTS.csv.gz`  
@@ -27,12 +28,21 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
    - `PRESCRIPTIONS.csv.gz`  
    - `PROCEDURES_ICD.csv.gz`  
 
-   Similarly, download the corresponding files from the [MIMIC-IV dataset](https://physionet.org/content/mimiciv/3.1/) (located in the `hosp` folder). Place them in the following directories:  
+   Similarly, download the corresponding files from the [MIMIC-IV dataset](https://physionet.org/content/mimiciv/3.1/) (located in the `hosp` folder).  
+   Place the files into the following directories:  
    - `./data_process/MIMIC-III-raw`  
    - `./data_process/MIMIC-IV-raw`  
 
-2. Run the notebook **`test_model.ipynb`**.  
-   - To evaluate performance on different tasks, set the `task_index` in the configuration file as follows:  
+2. **Preprocess the data**  
+   Run the notebooks:  
+   - `MIMIC-III.ipynb`  
+   - `MIMIC-IV.ipynb`  
+   
+   These notebooks will perform the necessary preprocessing steps and prepare the datasets for modeling.  
+
+3. **Train and evaluate the model**  
+   Run the notebook **`test_model.ipynb`**.  
+   - To evaluate performance on different tasks, adjust the `task_index` in the configuration file:  
      - `0`: In-hospital mortality  
      - `1`: Readmission  
      - `2`: Prolonged length of stay (PLOS)  
