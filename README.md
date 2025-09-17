@@ -10,13 +10,14 @@ The growing adoption of electronic health record (EHR) systems offers substantia
 ## Requirements
 The implementation of **DT-BEHRT** has been tested with the following environment:
 
-- Python == 3.10.18  
-- PyTorch == 1.13.1  
-- PyTorch Geometric == 2.7.0  
+- Python==3.10.18  
+- PyTorch==1.13.1  
+- torch_geometric==2.7.0  
 - tqdm  
-- scikit-learn == 1.7.0  
-- scipy == 1.15.3  
-- numpy == 1.26.4 
+- scikit-learn==1.7.0  
+- scipy==1.15.3  
+- numpy==1.26.4 
+- pandas==2.3.1
 
 ## Replicating the Results
 1. **Download the raw data**  

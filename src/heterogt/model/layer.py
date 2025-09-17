@@ -108,10 +108,6 @@ class HierTransformerLayer(nn.Module):
         
         # Exclude padding tokens: they should not be updated
         row_updatable = row_updatable & (~src_key_padding_mask)  # [B, L]
-
-        # Debug print
-        print(f"[DEBUG] row_updatable shape: {row_updatable.shape}, dtype: {row_updatable.dtype}")
-
         return row_updatable
     
 class DiseaseOccHetGNN(nn.Module):
