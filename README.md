@@ -14,10 +14,11 @@ The implementation of **DT-BEHRT** has been tested with the following environmen
 - PyTorch==1.13.1  
 - torch_geometric==2.7.0  
 - tqdm  
+- icd-mappings  
 - scikit-learn==1.7.0  
 - scipy==1.15.3  
 - numpy==1.26.4 
-- pandas==2.3.1
+- pandas==2.3.1  
 
 ## Replicating the Results
 1. **Download the raw data**  
